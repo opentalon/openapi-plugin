@@ -1,0 +1,4 @@
+/openapi-plugin
+*.test
+*.out
+.DS_Store
