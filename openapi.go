@@ -151,6 +151,38 @@ func buildOperation(method, path string, op *openapi3.Operation, pathLevel opena
 	return o
 }
 
+// toOperation converts a hand-declared ExtraOp into the same operation shape a
+// parsed spec op produces, so it merges into the action set and executes
+// identically. Validates the essentials the config author can get wrong.
+func (e ExtraOp) toOperation() (operation, error) {
+	if e.Name == "" || e.Method == "" || e.Path == "" {
+		return operation{}, fmt.Errorf("op %q: name, method and path are required", e.Name)
+	}
+	o := operation{
+		Name:        e.Name,
+		Method:      strings.ToUpper(e.Method),
+		PathTmpl:    e.Path,
+		Summary:     e.Summary,
+		Description: e.Description,
+		ReadOnly:    e.ReadOnly,
+	}
+	for _, p := range e.Params {
+		ap := apiParam{Name: p.Name, Type: p.Type, Required: p.Required, Desc: p.Desc, Schema: p.Schema}
+		switch p.In {
+		case "path":
+			ap.Required = true
+			o.PathParams = append(o.PathParams, ap)
+		case "query":
+			o.QueryParams = append(o.QueryParams, ap)
+		case "body", "":
+			o.BodyProps = append(o.BodyProps, ap)
+		default:
+			return operation{}, fmt.Errorf("op %q: param %q has invalid `in` %q (want path/query/body)", e.Name, p.Name, p.In)
+		}
+	}
+	return o, nil
+}
+
 func firstType(ref *openapi3.SchemaRef) string {
 	if ref == nil || ref.Value == nil || ref.Value.Type == nil {
 		return ""

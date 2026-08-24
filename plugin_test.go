@@ -210,6 +210,82 @@ func TestExecute_BuildsRequestAndForwardsIdentity(t *testing.T) {
 	}
 }
 
+func TestExtraOperation_RegistersAndExecutes(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{
+		ServerName: "timly-api",
+		SpecURL:    srv.URL + "/spec",
+		BaseURL:    srv.URL,
+		ExtraOps: []ExtraOp{{
+			Name:    "notify_user",
+			Method:  "POST",
+			Path:    "/api/v1/notifications",
+			Summary: "send a notification email",
+			Params: []ExtraOpParam{
+				{Name: "to", In: "body", Type: "string", Required: true},
+				{Name: "text", In: "body", Type: "string", Required: true},
+			},
+		}},
+	})
+	if err := h.Configure(string(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	// Registered as an action alongside the spec ops.
+	found := false
+	for _, a := range h.Capabilities().Actions {
+		if a.Name == "notify_user" {
+			found = true
+			if a.ReadOnly {
+				t.Errorf("notify_user should not be ReadOnly")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("extra op notify_user not registered")
+	}
+
+	// Executes as an HTTP POST with a JSON body and forwarded identity.
+	resp := h.Execute(plugin.Request{
+		ID:     "1",
+		Action: "notify_user",
+		Args:   map[string]string{"to": "me", "text": "hello"},
+		CredentialHeaders: map[string]plugin.CredentialHeader{
+			"timly": {Header: "X-Timly-User-Id", Value: "2383"},
+		},
+	})
+	if resp.Error != "" {
+		t.Fatalf("Execute error: %s", resp.Error)
+	}
+	if got.method != http.MethodPost || got.path != "/api/v1/notifications" {
+		t.Errorf("request line: got %s %s, want POST /api/v1/notifications", got.method, got.path)
+	}
+	if got.header != "2383" {
+		t.Errorf("identity header: got %q, want 2383", got.header)
+	}
+	if got.body["to"] != "me" || got.body["text"] != "hello" {
+		t.Errorf("body: got %v", got.body)
+	}
+}
+
+func TestExtraOperation_InvalidParamIn(t *testing.T) {
+	srv := newServer(t, &gotRequest{})
+	defer srv.Close()
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{
+		ServerName: "timly-api", SpecURL: srv.URL + "/spec", BaseURL: srv.URL,
+		ExtraOps: []ExtraOp{{Name: "bad", Method: "POST", Path: "/x",
+			Params: []ExtraOpParam{{Name: "p", In: "header"}}}},
+	})
+	if err := h.Configure(string(cfg)); err == nil {
+		t.Fatal("expected error for invalid param `in`")
+	}
+}
+
 func TestExecute_UnknownOperation(t *testing.T) {
 	srv := newServer(t, &gotRequest{})
 	defer srv.Close()

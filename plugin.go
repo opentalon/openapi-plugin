@@ -17,13 +17,38 @@ import (
 // and which static headers to add. Per-user identity is NOT configured here —
 // it arrives on each call via the host-injected credential headers.
 type Config struct {
-	ServerName  string            `json:"server_name"`  // tln server name, e.g. "timly-api"
-	SpecURL     string            `json:"spec_url"`     // OpenAPI 3 document URL (supports ${ENV})
-	BaseURL     string            `json:"base_url"`     // API base for calls (supports ${ENV})
-	Headers     map[string]string `json:"headers"`      // static request headers, e.g. a service bearer (values support ${ENV})
-	Allowlist   []string          `json:"allowlist"`    // if set, only these operation names are exposed
-	Timeout     string            `json:"timeout"`      // Go duration; default 15s
-	Description string            `json:"description"`  // capability description surfaced to the LLM
+	ServerName  string            `json:"server_name"`      // tln server name, e.g. "timly-api"
+	SpecURL     string            `json:"spec_url"`         // OpenAPI 3 document URL (supports ${ENV})
+	BaseURL     string            `json:"base_url"`         // API base for calls (supports ${ENV})
+	Headers     map[string]string `json:"headers"`          // static request headers, e.g. a service bearer (values support ${ENV})
+	Allowlist   []string          `json:"allowlist"`        // if set, only these SPEC operation names are exposed (extra_operations are always exposed)
+	ExtraOps    []ExtraOp         `json:"extra_operations"` // hand-declared ops not in the spec (e.g. an undocumented endpoint)
+	Timeout     string            `json:"timeout"`          // Go duration; default 15s
+	Description string            `json:"description"`      // capability description surfaced to the LLM
+}
+
+// ExtraOp declares an operation that is NOT in the OpenAPI doc — an endpoint the
+// spec deliberately omits (e.g. a service-only route). It carries the same shape
+// as a parsed operation so it merges into the action set and executes
+// identically. `in` on each param is "path", "query", or "body".
+type ExtraOp struct {
+	Name        string         `json:"name"`
+	Method      string         `json:"method"`
+	Path        string         `json:"path"`
+	Summary     string         `json:"summary"`
+	Description string         `json:"description"`
+	ReadOnly    bool           `json:"read_only"`
+	Params      []ExtraOpParam `json:"params"`
+}
+
+// ExtraOpParam is one input to an ExtraOp.
+type ExtraOpParam struct {
+	Name     string          `json:"name"`
+	In       string          `json:"in"` // "path" | "query" | "body"
+	Type     string          `json:"type"`
+	Required bool            `json:"required"`
+	Desc     string          `json:"description"`
+	Schema   json.RawMessage `json:"schema"`
 }
 
 type handler struct {
@@ -80,8 +105,18 @@ func (h *handler) Configure(configJSON string) error {
 			}
 		}
 	}
+	// Hand-declared operations are added AFTER allowlist filtering — they are
+	// always exposed (the allowlist only curates the spec-derived set). They
+	// override a same-named spec op.
+	for _, e := range cfg.ExtraOps {
+		o, err := e.toOperation()
+		if err != nil {
+			return fmt.Errorf("openapi-plugin: extra_operations: %w", err)
+		}
+		ops[o.Name] = o
+	}
 	if len(ops) == 0 {
-		return fmt.Errorf("openapi-plugin: spec produced no operations (check spec_url / allowlist)")
+		return fmt.Errorf("openapi-plugin: no operations (check spec_url / allowlist / extra_operations)")
 	}
 
 	h.cfg = cfg

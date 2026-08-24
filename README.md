@@ -42,6 +42,16 @@ plugins:
         X-Opentalon-MCP-Token: "${OPENTALON_MCP_TOKEN}"
       allowlist: [create_ticket, update_ticket, list_ticket_templates, checkout_item]  # optional
       timeout: "15s"
+      extra_operations:                                          # ops NOT in the spec (service-only routes)
+        - name: notify_user
+          method: POST
+          path: /api/v1/notifications
+          summary: send a notification email to a user
+          params:
+            - {name: to,   in: body, type: string, required: true}
+            - {name: text, in: body, type: string, required: true}
+            - {name: subject,  in: body, type: string}
+            - {name: workflow, in: body, type: string}
 ```
 
 | Field | Required | Description |
@@ -50,7 +60,8 @@ plugins:
 | `spec_url` | **yes** | OpenAPI 3 document URL (`${ENV}` expanded) |
 | `base_url` | **yes** | API base for calls (`${ENV}` expanded) |
 | `headers` | no | static request headers; values support `${ENV}` |
-| `allowlist` | no | if set, only these operation names are exposed |
+| `allowlist` | no | if set, only these **spec** operation names are exposed (extra_operations are always exposed) |
+| `extra_operations` | no | hand-declared ops the spec omits (a service-only route); each has `name`/`method`/`path` + `params` (`in`: path/query/body). Executes and RAG-syncs like a spec op. |
 | `timeout` | no (default `15s`) | Go duration for spec fetch + calls |
 
 ## Build
