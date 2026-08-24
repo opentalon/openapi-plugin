@@ -87,7 +87,11 @@ func (h *handler) buildRequest(o operation, args map[string]string, creds map[st
 			}
 		}
 		if len(payload) > 0 {
-			b, err := json.Marshal(payload)
+			var out any = payload
+			if o.BodyWrap != "" {
+				out = map[string]any{o.BodyWrap: payload} // {"ticket": {...}}
+			}
+			b, err := json.Marshal(out)
 			if err != nil {
 				return nil, fmt.Errorf("%s: marshal body: %w", o.Name, err)
 			}

@@ -39,6 +39,10 @@ type ExtraOp struct {
 	Description string         `json:"description"`
 	ReadOnly    bool           `json:"read_only"`
 	Params      []ExtraOpParam `json:"params"`
+	// BodyWrap, when set, nests all body params under this single key at
+	// execution — so flat args map to a wrapped JSON body like Timly's
+	// {"ticket": {...}} / {"item": {...}}. Empty = flat body.
+	BodyWrap string `json:"body_wrap"`
 }
 
 // ExtraOpParam is one input to an ExtraOp.

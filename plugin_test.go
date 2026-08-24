@@ -272,6 +272,50 @@ func TestExtraOperation_RegistersAndExecutes(t *testing.T) {
 	}
 }
 
+func TestExtraOperation_BodyWrap(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{
+		ServerName: "timly-api", SpecURL: srv.URL + "/spec", BaseURL: srv.URL,
+		ExtraOps: []ExtraOp{{
+			Name: "create_ticket", Method: "POST", Path: "/api/v1/tickets", BodyWrap: "ticket",
+			Params: []ExtraOpParam{
+				{Name: "name", In: "body", Type: "string", Required: true},
+				{Name: "org_unit_id", In: "body", Type: "integer"},
+				{Name: "assignee_ids", In: "body", Type: "array"},
+			},
+		}},
+	})
+	if err := h.Configure(string(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	resp := h.Execute(plugin.Request{
+		ID: "1", Action: "create_ticket",
+		Args: map[string]string{"name": "Repair", "org_unit_id": "5", "assignee_ids": "[2383]"},
+	})
+	if resp.Error != "" {
+		t.Fatalf("Execute error: %s", resp.Error)
+	}
+	// Flat args must arrive nested under "ticket", with types coerced.
+	inner, ok := got.body["ticket"].(map[string]any)
+	if !ok {
+		t.Fatalf("body not wrapped under `ticket`: %v", got.body)
+	}
+	if inner["name"] != "Repair" {
+		t.Errorf("ticket.name: got %v", inner["name"])
+	}
+	if v, ok := inner["org_unit_id"].(float64); !ok || v != 5 {
+		t.Errorf("ticket.org_unit_id: got %v (%T), want number 5", inner["org_unit_id"], inner["org_unit_id"])
+	}
+	if arr, ok := inner["assignee_ids"].([]any); !ok || len(arr) != 1 || arr[0].(float64) != 2383 {
+		t.Errorf("ticket.assignee_ids: got %v, want [2383]", inner["assignee_ids"])
+	}
+}
+
 func TestExtraOperation_InvalidParamIn(t *testing.T) {
 	srv := newServer(t, &gotRequest{})
 	defer srv.Close()

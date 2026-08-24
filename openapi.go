@@ -23,7 +23,8 @@ type operation struct {
 	PathParams  []apiParam
 	QueryParams []apiParam
 	BodyProps   []apiParam
-	ReadOnly    bool // GET → no confirmation gate
+	ReadOnly    bool   // GET → no confirmation gate
+	BodyWrap    string // if set, nest body params under this key (Timly's {"ticket": {...}})
 }
 
 // apiParam is one input to an operation (path / query / body).
@@ -165,6 +166,7 @@ func (e ExtraOp) toOperation() (operation, error) {
 		Summary:     e.Summary,
 		Description: e.Description,
 		ReadOnly:    e.ReadOnly,
+		BodyWrap:    e.BodyWrap,
 	}
 	for _, p := range e.Params {
 		ap := apiParam{Name: p.Name, Type: p.Type, Required: p.Required, Desc: p.Desc, Schema: p.Schema}
