@@ -44,43 +44,38 @@ plugins:
     config:
       server_name: "inventory-api"                # tln server name: tool "inventory-api" "…"
       spec_url:    "http://localhost:8080/openapi.json"
+      extra_spec_urls:                            # supplementary docs the API owner serves for
+        - "http://localhost:8080/openapi-extra.json"   # service-only routes kept out of the main spec
       base_url:    "http://localhost:8080"
       headers:                                     # static, ${ENV} expanded
         X-Service-Token: "${SERVICE_TOKEN}"
       allowlist: [create_item, update_item, list_categories, reserve_item]  # optional
       timeout: "15s"
-      extra_operations:                            # ops NOT in the spec (service-only routes)
-        - name: send_alert
-          method: POST
-          path: /api/v1/alerts
-          summary: send an alert to a user
-          params:
-            - {name: to,   in: body, type: string, required: true}
-            - {name: text, in: body, type: string, required: true}
-        - name: create_order                       # flat args re-nested under "order" at execution
-          method: POST
-          path: /api/v1/orders
-          body_wrap: order
-          params:
-            - {name: item_id,  in: body, type: integer, required: true}
-            - {name: quantity, in: body, type: integer, required: true}
 ```
+
+Prefer **`extra_spec_urls`** for routes the main spec omits — the API owner keeps
+the definition (with `x-llm-description`, schemas) in a doc it serves, not in this
+config. `extra_operations` (below) is a last resort for when no doc exists at all.
 
 | Field | Required | Description |
 |---|---|---|
 | `server_name` | no (default `api`) | the tln server name: `tool "<server_name>" "…"` |
 | `spec_url` | **yes** | OpenAPI 3 document URL (`${ENV}` expanded) |
+| `extra_spec_urls` | no | additional OpenAPI docs, fetched and merged (always exposed). For service-only routes the owner keeps out of the public spec. |
 | `base_url` | **yes** | API base for calls (`${ENV}` expanded) |
 | `headers` | no | static request headers; values support `${ENV}` |
-| `allowlist` | no | if set, only these **spec** operation names are exposed (extra_operations are always exposed) |
-| `extra_operations` | no | hand-declared ops the spec omits (a service-only route); each has `name`/`method`/`path` + `params` (`in`: path/query/body), optional `body_wrap` to nest body params under one key. Executes and RAG-syncs like a spec op. |
+| `allowlist` | no | if set, only these **primary-spec** operation names are exposed (extra specs are always exposed) |
+| `extra_operations` | no | last-resort hand-declared ops (no doc exists); each has `name`/`method`/`path` + `params` (`in`: path/query/body), optional `body_wrap` to nest body params under one key |
 | `timeout` | no (default `15s`) | Go duration for spec fetch + calls |
 
 ## Build
 
+No Makefile — OpenTalon clones this repo and runs `go build -o <plugin-id> .`
+(the plugin id is the `config.yaml` map key). For local work:
+
 ```sh
-make build   # go mod tidy && go build -o openapi-plugin .
-make test
+go build -o openapi-plugin .
+go test ./...
 ```
 
 Depends on `github.com/opentalon/opentalon` `pkg/plugin` and

@@ -17,14 +17,15 @@ import (
 // and which static headers to add. Per-user identity is NOT configured here —
 // it arrives on each call via the host-injected credential headers.
 type Config struct {
-	ServerName  string            `json:"server_name"`      // tln server name, e.g. "timly-api"
-	SpecURL     string            `json:"spec_url"`         // OpenAPI 3 document URL (supports ${ENV})
-	BaseURL     string            `json:"base_url"`         // API base for calls (supports ${ENV})
-	Headers     map[string]string `json:"headers"`          // static request headers, e.g. a service bearer (values support ${ENV})
-	Allowlist   []string          `json:"allowlist"`        // if set, only these SPEC operation names are exposed (extra_operations are always exposed)
-	ExtraOps    []ExtraOp         `json:"extra_operations"` // hand-declared ops not in the spec (e.g. an undocumented endpoint)
-	Timeout     string            `json:"timeout"`          // Go duration; default 15s
-	Description string            `json:"description"`      // capability description surfaced to the LLM
+	ServerName    string            `json:"server_name"`      // tln server name, e.g. "timly-api"
+	SpecURL       string            `json:"spec_url"`         // OpenAPI 3 document URL (supports ${ENV})
+	ExtraSpecURLs []string          `json:"extra_spec_urls"`  // additional OpenAPI docs (e.g. the API owner's supplementary docs for service-only routes); merged in, always exposed
+	BaseURL       string            `json:"base_url"`         // API base for calls (supports ${ENV})
+	Headers       map[string]string `json:"headers"`          // static request headers, e.g. a service bearer (values support ${ENV})
+	Allowlist     []string          `json:"allowlist"`        // if set, only these primary-SPEC operation names are exposed (extra specs + extra_operations are always exposed)
+	ExtraOps      []ExtraOp         `json:"extra_operations"` // hand-declared ops not in any doc (last resort; prefer extra_spec_urls so the API owner keeps the definition)
+	Timeout       string            `json:"timeout"`          // Go duration; default 15s
+	Description   string            `json:"description"`      // capability description surfaced to the LLM
 }
 
 // ExtraOp declares an operation that is NOT in the OpenAPI doc — an endpoint the
@@ -109,9 +110,21 @@ func (h *handler) Configure(configJSON string) error {
 			}
 		}
 	}
-	// Hand-declared operations are added AFTER allowlist filtering — they are
-	// always exposed (the allowlist only curates the spec-derived set). They
-	// override a same-named spec op.
+	// Additional OpenAPI docs (e.g. the API owner's supplementary docs for
+	// service-only routes it keeps out of the public spec) are fetched and
+	// merged AFTER allowlist filtering — always exposed. Their definitions live
+	// with the API owner, not in this config.
+	for _, u := range cfg.ExtraSpecURLs {
+		extra, err := loadSpec(context.Background(), os.Expand(u, os.Getenv), timeout)
+		if err != nil {
+			return fmt.Errorf("openapi-plugin: extra_spec_urls: %w", err)
+		}
+		for n, o := range extra {
+			ops[n] = o
+		}
+	}
+	// Hand-declared operations are added last — always exposed. They override a
+	// same-named spec op. Prefer extra_spec_urls; use this only when no doc exists.
 	for _, e := range cfg.ExtraOps {
 		o, err := e.toOperation()
 		if err != nil {
@@ -120,7 +133,7 @@ func (h *handler) Configure(configJSON string) error {
 		ops[o.Name] = o
 	}
 	if len(ops) == 0 {
-		return fmt.Errorf("openapi-plugin: no operations (check spec_url / allowlist / extra_operations)")
+		return fmt.Errorf("openapi-plugin: no operations (check spec_url / allowlist / extra_spec_urls)")
 	}
 
 	h.cfg = cfg
