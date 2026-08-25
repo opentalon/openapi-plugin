@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/opentalon/opentalon/pkg/plugin"
@@ -313,6 +314,110 @@ func TestExtraOperation_BodyWrap(t *testing.T) {
 	}
 	if arr, ok := inner["assignee_ids"].([]any); !ok || len(arr) != 1 || arr[0].(float64) != 2383 {
 		t.Errorf("ticket.assignee_ids: got %v, want [2383]", inner["assignee_ids"])
+	}
+}
+
+const allOfSpec = `{
+  "openapi": "3.0.0", "info": {"title": "t", "version": "1"},
+  "paths": {
+    "/api/v1/tickets": {
+      "post": {"summary": "create ticket",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/ticket_create_request"}}}}}
+    }
+  },
+  "components": {"schemas": {
+    "ticket": {"type": "object", "properties": {
+      "name": {"type": "string"}, "org_unit_id": {"type": "integer"}, "assignee_ids": {"type": "array"}}},
+    "ticket_create_attributes": {"allOf": [
+      {"$ref": "#/components/schemas/ticket"},
+      {"type": "object", "required": ["name", "assignee_ids"]}]},
+    "ticket_create_request": {"type": "object", "required": ["ticket"],
+      "properties": {"ticket": {"$ref": "#/components/schemas/ticket_create_attributes"}}}
+  }}
+}`
+
+func TestAllOfUnwrap(t *testing.T) {
+	var got gotRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/spec", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, allOfSpec) })
+	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+		got.method, got.path = r.Method, r.URL.Path
+		if b, _ := io.ReadAll(r.Body); len(b) > 0 {
+			_ = json.Unmarshal(b, &got.body)
+		}
+		_, _ = io.WriteString(w, `{"id":9}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{ServerName: "timly-api", SpecURL: srv.URL + "/spec", BaseURL: srv.URL})
+	if err := h.Configure(string(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	// allOf resolved + wrapper auto-detected: flat name/org_unit_id/assignee_ids, required name+assignee_ids.
+	var ct plugin.ActionMsg
+	for _, a := range h.Capabilities().Actions {
+		if a.Name == "create_ticket" {
+			ct = a
+		}
+	}
+	got3 := map[string]bool{}
+	for _, p := range ct.Parameters {
+		got3[p.Name] = p.Required
+	}
+	for _, want := range []string{"name", "org_unit_id", "assignee_ids"} {
+		if _, ok := got3[want]; !ok {
+			t.Errorf("create_ticket missing flattened param %q (params=%v)", want, got3)
+		}
+	}
+	if !got3["name"] || !got3["assignee_ids"] {
+		t.Errorf("expected name+assignee_ids required, got %v", got3)
+	}
+
+	// Execution re-wraps flat args under "ticket".
+	h.Execute(plugin.Request{ID: "1", Action: "create_ticket",
+		Args: map[string]string{"name": "x", "org_unit_id": "5", "assignee_ids": "[1]"}})
+	inner, ok := got.body["ticket"].(map[string]any)
+	if !ok {
+		t.Fatalf("body not wrapped under ticket: %v", got.body)
+	}
+	if inner["name"] != "x" || inner["org_unit_id"].(float64) != 5 {
+		t.Errorf("wrapped body wrong: %v", inner)
+	}
+}
+
+func TestLLMDescriptionExtension(t *testing.T) {
+	spec := `{
+      "openapi": "3.0.0", "info": {"title": "t", "version": "1"},
+      "paths": {"/api/v1/items": {"get": {
+        "summary": "lists items",
+        "x-llm-description": "Use this to find items before assigning them.",
+        "x-synonyms": "search, lookup, find"
+      }}}
+    }`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/spec", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, spec) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{ServerName: "timly-api", SpecURL: srv.URL + "/spec", BaseURL: srv.URL})
+	if err := h.Configure(string(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	var desc string
+	for _, a := range h.Capabilities().Actions {
+		if a.Name == "list_items" {
+			desc = a.Description
+		}
+	}
+	if !strings.Contains(desc, "find items before assigning") {
+		t.Errorf("x-llm-description not surfaced: %q", desc)
+	}
+	if !strings.Contains(desc, "search, lookup, find") {
+		t.Errorf("x-synonyms not surfaced: %q", desc)
 	}
 }
 

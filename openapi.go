@@ -25,6 +25,8 @@ type operation struct {
 	BodyProps   []apiParam
 	ReadOnly    bool   // GET → no confirmation gate
 	BodyWrap    string // if set, nest body params under this key (Timly's {"ticket": {...}})
+	LLMText     string // x-llm-description: extra guidance surfaced only to the LLM
+	Synonyms    string // x-synonyms: alt phrasings, appended so RAG retrieval matches them
 }
 
 // apiParam is one input to an operation (path / query / body).
@@ -93,6 +95,8 @@ func buildOperation(method, path string, op *openapi3.Operation, pathLevel opena
 		Summary:     op.Summary,
 		Description: op.Description,
 		ReadOnly:    strings.EqualFold(method, http.MethodGet),
+		LLMText:     extString(op.Extensions, "x-llm-description"),
+		Synonyms:    extString(op.Extensions, "x-synonyms"),
 	}
 	if op.OperationID != "" {
 		o.Name = op.OperationID
@@ -122,34 +126,123 @@ func buildOperation(method, path string, op *openapi3.Operation, pathLevel opena
 		}
 	}
 
-	// Request body: the application/json object schema's properties.
+	// Request body: the application/json object's properties, with allOf
+	// composition resolved. A body that is a single object property (Timly's
+	// {"ticket": {...}} wrapper) is auto-unwrapped — its inner props become the
+	// flat params and o.BodyWrap re-nests them at execution.
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
 		if mt := op.RequestBody.Value.Content.Get("application/json"); mt != nil && mt.Schema != nil && mt.Schema.Value != nil {
-			s := mt.Schema.Value
-			required := map[string]bool{}
-			for _, r := range s.Required {
-				required[r] = true
+			props, required := collectProps(mt.Schema.Value, map[*openapi3.Schema]bool{})
+			if wrapKey, inner := unwrapSingleObject(props); wrapKey != "" {
+				o.BodyWrap = wrapKey
+				props, required = collectProps(inner, map[*openapi3.Schema]bool{})
 			}
-			names := make([]string, 0, len(s.Properties))
-			for n := range s.Properties {
-				names = append(names, n)
-			}
-			sort.Strings(names) // stable action schema across runs (hash-based sync skip)
-			for _, n := range names {
-				pr := s.Properties[n]
-				ap := apiParam{Name: n, Required: required[n]}
-				if pr != nil {
-					ap.Type = firstType(pr)
-					if pr.Value != nil {
-						ap.Desc = pr.Value.Description
-					}
-					ap.Schema = marshalSchema(pr)
-				}
-				o.BodyProps = append(o.BodyProps, ap)
-			}
+			o.BodyProps = bodyParams(props, required)
 		}
 	}
 	return o
+}
+
+// collectProps walks a schema's own properties plus those it composes via allOf
+// (recursively, $refs resolved by the loader). oneOf/anyOf branch properties are
+// also collected for the arg list, but their `required` is NOT — it is
+// conditional per branch. Returns the merged property set and the unconditional
+// required names.
+func collectProps(s *openapi3.Schema, seen map[*openapi3.Schema]bool) (map[string]*openapi3.SchemaRef, []string) {
+	props := map[string]*openapi3.SchemaRef{}
+	var required []string
+	if s == nil || seen[s] {
+		return props, required
+	}
+	seen[s] = true
+
+	for name, p := range s.Properties {
+		props[name] = p
+	}
+	required = append(required, s.Required...)
+
+	for _, sub := range s.AllOf {
+		if sub != nil && sub.Value != nil {
+			p, r := collectProps(sub.Value, seen)
+			for k, v := range p {
+				props[k] = v
+			}
+			required = append(required, r...)
+		}
+	}
+	for _, group := range [][]*openapi3.SchemaRef{s.OneOf, s.AnyOf} {
+		for _, sub := range group {
+			if sub != nil && sub.Value != nil {
+				p, _ := collectProps(sub.Value, seen)
+				for k, v := range p {
+					if _, ok := props[k]; !ok {
+						props[k] = v
+					}
+				}
+			}
+		}
+	}
+	return props, dedupe(required)
+}
+
+// unwrapSingleObject returns (key, innerSchema) when props is exactly one entry
+// whose value is an object (has its own props / allOf) — the wrapper convention.
+// Otherwise ("", nil): a flat body.
+func unwrapSingleObject(props map[string]*openapi3.SchemaRef) (string, *openapi3.Schema) {
+	if len(props) != 1 {
+		return "", nil
+	}
+	for key, ref := range props {
+		if ref == nil || ref.Value == nil {
+			return "", nil
+		}
+		v := ref.Value
+		if len(v.Properties) > 0 || len(v.AllOf) > 0 || (v.Type != nil && v.Type.Is("object")) {
+			return key, v
+		}
+	}
+	return "", nil
+}
+
+// bodyParams turns a resolved property set into sorted apiParams (stable output
+// for hash-based RAG sync).
+func bodyParams(props map[string]*openapi3.SchemaRef, required []string) []apiParam {
+	req := map[string]bool{}
+	for _, r := range required {
+		req[r] = true
+	}
+	names := make([]string, 0, len(props))
+	for n := range props {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	out := make([]apiParam, 0, len(names))
+	for _, n := range names {
+		pr := props[n]
+		ap := apiParam{Name: n, Required: req[n]}
+		if pr != nil {
+			ap.Type = firstType(pr)
+			if pr.Value != nil {
+				ap.Desc = pr.Value.Description
+			}
+			ap.Schema = marshalSchema(pr)
+		}
+		out = append(out, ap)
+	}
+	return out
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := in[:0]
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // toOperation converts a hand-declared ExtraOp into the same operation shape a
@@ -183,6 +276,25 @@ func (e ExtraOp) toOperation() (operation, error) {
 		}
 	}
 	return o, nil
+}
+
+// extString reads an x- extension as a string. OpenAPI extensions arrive as
+// any; accept a plain string or a JSON string. Returns "" when absent.
+func extString(ext map[string]any, key string) string {
+	v, ok := ext[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch s := v.(type) {
+	case string:
+		return s
+	case json.RawMessage:
+		var out string
+		if json.Unmarshal(s, &out) == nil {
+			return out
+		}
+	}
+	return ""
 }
 
 func firstType(ref *openapi3.SchemaRef) string {

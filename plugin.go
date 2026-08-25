@@ -161,14 +161,21 @@ func (h *handler) Capabilities() plugin.CapabilitiesMsg {
 	}
 }
 
+// describe builds the LLM-facing action description: summary + description, then
+// any x-llm-description guidance and x-synonyms (so RAG retrieval matches alt
+// phrasings). Empty segments are skipped.
 func describe(o operation) string {
-	if o.Description == "" {
-		return o.Summary
+	segments := []string{o.Summary, o.Description, o.LLMText}
+	if o.Synonyms != "" {
+		segments = append(segments, "Synonyms: "+o.Synonyms)
 	}
-	if o.Summary == "" {
-		return o.Description
+	parts := make([]string, 0, len(segments))
+	for _, s := range segments {
+		if strings.TrimSpace(s) != "" {
+			parts = append(parts, s)
+		}
 	}
-	return o.Summary + "\n\n" + o.Description
+	return strings.Join(parts, "\n\n")
 }
 
 func toParam(p apiParam) plugin.ParameterMsg {
