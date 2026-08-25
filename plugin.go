@@ -14,8 +14,10 @@ import (
 )
 
 // Config is one API surface: where to fetch its OpenAPI doc, where to call it,
-// and which static headers to add. Per-user identity is NOT configured here —
-// it arrives on each call via the host-injected credential headers.
+// and which static headers to add. Per-user identity arrives per-call: the host
+// injects the actor id under IdentityArg (a context arg the actions opt into),
+// and the plugin forwards it as the IdentityHeader — so a scheduled/reactive run
+// carries the workflow owner's identity, not just the static service header.
 type Config struct {
 	ServerName    string            `json:"server_name"`      // tln server name, e.g. "timly-api"
 	SpecURL       string            `json:"spec_url"`         // OpenAPI 3 document URL (supports ${ENV})
@@ -24,8 +26,14 @@ type Config struct {
 	Headers       map[string]string `json:"headers"`          // static request headers, e.g. a service bearer (values support ${ENV})
 	Allowlist     []string          `json:"allowlist"`        // if set, only these primary-SPEC operation names are exposed (extra specs + extra_operations are always exposed)
 	ExtraOps      []ExtraOp         `json:"extra_operations"` // hand-declared ops not in any doc (last resort; prefer extra_spec_urls so the API owner keeps the definition)
-	Timeout       string            `json:"timeout"`          // Go duration; default 15s
-	Description   string            `json:"description"`      // capability description surfaced to the LLM
+	// IdentityArg is the host context-arg the actions opt into (default
+	// "entity_id"); IdentityHeader is the request header its value is sent as
+	// (the API's user-identity header, named here — not in code). Both set →
+	// per-call identity forwarding is on.
+	IdentityArg    string `json:"identity_arg"`
+	IdentityHeader string `json:"identity_header"`
+	Timeout        string `json:"timeout"`     // Go duration; default 15s
+	Description    string `json:"description"` // capability description surfaced to the LLM
 }
 
 // ExtraOp declares an operation that is NOT in the OpenAPI doc — an endpoint the
@@ -80,6 +88,9 @@ func (h *handler) Configure(configJSON string) error {
 	}
 	if cfg.ServerName == "" {
 		cfg.ServerName = "api"
+	}
+	if cfg.IdentityArg == "" {
+		cfg.IdentityArg = "entity_id"
 	}
 	timeout := 15 * time.Second
 	if cfg.Timeout != "" {
@@ -157,10 +168,11 @@ func (h *handler) Capabilities() plugin.CapabilitiesMsg {
 			params = append(params, toParam(p))
 		}
 		actions = append(actions, plugin.ActionMsg{
-			Name:        name,
-			Description: describe(o),
-			Parameters:  params,
-			ReadOnly:    o.ReadOnly,
+			Name:              name,
+			Description:       describe(o),
+			Parameters:        params,
+			ReadOnly:          o.ReadOnly,
+			InjectContextArgs: h.injectArgs(),
 		})
 	}
 	desc := h.cfg.Description
@@ -177,6 +189,15 @@ func (h *handler) Capabilities() plugin.CapabilitiesMsg {
 // describe builds the LLM-facing action description: summary + description, then
 // any x-llm-description guidance and x-synonyms (so RAG retrieval matches alt
 // phrasings). Empty segments are skipped.
+// injectArgs asks the host to inject the actor-identity context arg before each
+// Execute, so identity forwarding works. Empty when not configured.
+func (h *handler) injectArgs() []string {
+	if h.cfg.IdentityHeader == "" {
+		return nil
+	}
+	return []string{h.cfg.IdentityArg}
+}
+
 func describe(o operation) string {
 	segments := []string{o.Summary, o.Description, o.LLMText}
 	if o.Synonyms != "" {

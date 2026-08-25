@@ -15,8 +15,10 @@ import (
 )
 
 // Execute turns a `tool "<server>" "<operation>" { args }` call into the HTTP
-// request the OpenAPI operation describes, forwarding the caller's identity via
-// the host-injected credential headers. A 2xx JSON body is returned as
+// request the OpenAPI operation describes, forwarding the caller's identity two
+// ways: the host-injected credential headers (interactive path) and the
+// configured IdentityHeader set from the host-injected IdentityArg (scheduled /
+// reactive path, where there is no session). A 2xx JSON body is returned as
 // StructuredContent so later workflow steps can navigate it (step("s").field).
 func (h *handler) Execute(req plugin.Request) plugin.Response {
 	o, ok := h.ops[req.Action]
@@ -24,7 +26,18 @@ func (h *handler) Execute(req plugin.Request) plugin.Response {
 		return plugin.Response{CallID: req.ID, Error: "openapi-plugin: unknown operation: " + req.Action}
 	}
 
-	httpReq, err := h.buildRequest(o, req.Args, req.CredentialHeaders)
+	// Pull the injected actor id out of the args (it is identity, never a
+	// path/query/body param) and remember it as the identity header value.
+	identity := ""
+	args := req.Args
+	if h.cfg.IdentityHeader != "" {
+		if v, present := args[h.cfg.IdentityArg]; present {
+			identity = v
+			args = withoutKey(args, h.cfg.IdentityArg)
+		}
+	}
+
+	httpReq, err := h.buildRequest(o, args, req.CredentialHeaders, identity)
 	if err != nil {
 		return plugin.Response{CallID: req.ID, Error: "openapi-plugin: " + err.Error()}
 	}
@@ -52,7 +65,7 @@ func (h *handler) Execute(req plugin.Request) plugin.Response {
 	return plugin.Response{CallID: req.ID, Content: string(body)}
 }
 
-func (h *handler) buildRequest(o operation, args map[string]string, creds map[string]plugin.CredentialHeader) (*http.Request, error) {
+func (h *handler) buildRequest(o operation, args map[string]string, creds map[string]plugin.CredentialHeader, identity string) (*http.Request, error) {
 	// Path params — substitute {name}; all are required.
 	path := o.PathTmpl
 	for _, p := range o.PathParams {
@@ -113,14 +126,30 @@ func (h *handler) buildRequest(o operation, args map[string]string, creds map[st
 			req.Header.Set(k, v)
 		}
 	}
-	// Forward whoami-provided credential headers (the caller's identity, e.g.
-	// X-Timly-User-Id) — this is how the call runs AS the workflow's owner.
+	// Forward whoami-provided credential headers (the caller's identity in an
+	// interactive session) — this runs the call AS the workflow's owner.
 	for _, c := range creds {
 		if c.Header != "" {
 			req.Header.Set(c.Header, c.Value)
 		}
 	}
+	// Reactive/scheduled path: no session credentials, so send the host-injected
+	// actor id as the configured identity header (name is config, not code).
+	if h.cfg.IdentityHeader != "" && identity != "" {
+		req.Header.Set(h.cfg.IdentityHeader, identity)
+	}
 	return req, nil
+}
+
+// withoutKey returns a copy of m without key k.
+func withoutKey(m map[string]string, k string) map[string]string {
+	out := make(map[string]string, len(m))
+	for key, v := range m {
+		if key != k {
+			out[key] = v
+		}
+	}
+	return out
 }
 
 // coerce converts a string arg (all tln args arrive as strings) to the JSON type

@@ -103,11 +103,12 @@ const testSpec = `
 
 // gotRequest captures what the fake API received.
 type gotRequest struct {
-	method string
-	path   string
-	query  string
-	header string
-	body   map[string]any
+	method      string
+	path        string
+	query       string
+	header      string // X-Timly-User-Id (credential-header path)
+	identityHdr string // X-App-User (configured IdentityHeader path)
+	body        map[string]any
 }
 
 func newServer(t *testing.T, capture *gotRequest) *httptest.Server {
@@ -121,6 +122,7 @@ func newServer(t *testing.T, capture *gotRequest) *httptest.Server {
 		capture.path = r.URL.Path
 		capture.query = r.URL.RawQuery
 		capture.header = r.Header.Get("X-Timly-User-Id")
+		capture.identityHdr = r.Header.Get("X-App-User")
 		if b, _ := io.ReadAll(r.Body); len(b) > 0 {
 			_ = json.Unmarshal(b, &capture.body)
 		}
@@ -418,6 +420,43 @@ func TestLLMDescriptionExtension(t *testing.T) {
 	}
 	if !strings.Contains(desc, "search, lookup, find") {
 		t.Errorf("x-synonyms not surfaced: %q", desc)
+	}
+}
+
+func TestIdentityHeaderForwarding(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+
+	h := &handler{}
+	cfg, _ := json.Marshal(Config{
+		ServerName: "timly-api", SpecURL: srv.URL + "/spec", BaseURL: srv.URL,
+		IdentityHeader: "X-App-User", // header name from config, not code
+		// IdentityArg defaults to entity_id
+	})
+	if err := h.Configure(string(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	// Actions opt into the entity_id context arg so the host injects it.
+	for _, a := range h.Capabilities().Actions {
+		if a.Name == "list_ticket_templates" {
+			if len(a.InjectContextArgs) != 1 || a.InjectContextArgs[0] != "entity_id" {
+				t.Errorf("expected InjectContextArgs [entity_id], got %v", a.InjectContextArgs)
+			}
+		}
+	}
+
+	// The injected entity_id is sent as the configured header, NOT as a query param.
+	h.Execute(plugin.Request{
+		ID: "1", Action: "list_ticket_templates",
+		Args: map[string]string{"query": "x", "entity_id": "2383"},
+	})
+	if got.identityHdr != "2383" {
+		t.Errorf("identity header X-App-User: got %q, want 2383", got.identityHdr)
+	}
+	if strings.Contains(got.query, "entity_id") {
+		t.Errorf("entity_id leaked into query: %s", got.query)
 	}
 }
 
