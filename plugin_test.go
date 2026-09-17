@@ -213,6 +213,56 @@ func TestExecute_BuildsRequestAndForwardsIdentity(t *testing.T) {
 	}
 }
 
+// TestExecute_DryRunSkipsWrites verifies the dry-run gate: with __ot_cb_dry_run
+// set, a WRITE operation makes no HTTP call and returns a synthetic "would-do"
+// result, while a READ operation still executes normally against real data.
+func TestExecute_DryRunSkipsWrites(t *testing.T) {
+	// Write op under dry run: no HTTP request must reach the fake API.
+	var wrote gotRequest
+	srvW := newServer(t, &wrote)
+	defer srvW.Close()
+	hW := configured(t, srvW)
+
+	resp := hW.Execute(plugin.Request{
+		ID:     "1",
+		Action: "update_ticket",
+		Args:   map[string]string{"id": "7", "name": "x", dryRunArg: "true"},
+	})
+	if resp.Error != "" {
+		t.Fatalf("dry-run write: unexpected error %q", resp.Error)
+	}
+	if wrote.method != "" {
+		t.Fatalf("dry-run write executed an HTTP call (%s %s) — writes must be skipped", wrote.method, wrote.path)
+	}
+	var would map[string]any
+	if err := json.Unmarshal([]byte(resp.StructuredContent), &would); err != nil {
+		t.Fatalf("dry-run structured content not JSON: %v (%q)", err, resp.StructuredContent)
+	}
+	if would["dry_run"] != true || would["operation"] != "update_ticket" {
+		t.Errorf("dry-run payload: got %v, want dry_run+operation=update_ticket", would)
+	}
+	// The reserved flag must not leak into the recorded args.
+	if args, _ := would["args"].(map[string]any); args != nil {
+		if _, leaked := args[dryRunArg]; leaked {
+			t.Errorf("dry-run flag leaked into recorded args: %v", args)
+		}
+	}
+
+	// Read op under dry run: still executes (a dry run reads real data).
+	var read gotRequest
+	srvR := newServer(t, &read)
+	defer srvR.Close()
+	hR := configured(t, srvR)
+	hR.Execute(plugin.Request{
+		ID:     "2",
+		Action: "list_ticket_templates",
+		Args:   map[string]string{dryRunArg: "true"},
+	})
+	if read.method != http.MethodGet {
+		t.Errorf("dry-run read did NOT execute: got method %q, want GET", read.method)
+	}
+}
+
 func TestExtraOperation_RegistersAndExecutes(t *testing.T) {
 	var got gotRequest
 	srv := newServer(t, &got)
