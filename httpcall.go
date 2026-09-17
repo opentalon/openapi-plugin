@@ -20,10 +20,43 @@ import (
 // configured IdentityHeader set from the host-injected IdentityArg (scheduled /
 // reactive path, where there is no session). A 2xx JSON body is returned as
 // StructuredContent so later workflow steps can navigate it (step("s").field).
+// dryRunArg is the reserved arg a workflow dry run stamps onto every tool call
+// (set by tln-plugin's tlnCaller when the execute_workflow call requested a dry
+// run). It is NOT an OpenAPI parameter, so it is stripped before building the
+// request. Kept in sync with tln-plugin's constant of the same name.
+const dryRunArg = "__ot_cb_dry_run"
+
 func (h *handler) Execute(req plugin.Request) plugin.Response {
 	o, ok := h.ops[req.Action]
 	if !ok {
 		return plugin.Response{CallID: req.ID, Error: "openapi-plugin: unknown operation: " + req.Action}
+	}
+
+	// Dry-run gate. A dry run reads real data (GET operations execute normally)
+	// but performs NO writes: any mutating operation (non-GET → ReadOnly=false)
+	// is short-circuited — no HTTP request is made — and a synthetic "would-do"
+	// result is returned instead, carrying the intended operation + arguments so
+	// the caller can show what WOULD have happened and downstream `when` guards
+	// still evaluate. The flag never reaches buildRequest.
+	dryRun := req.Args[dryRunArg] == "true"
+	if dryRun {
+		req.Args = withoutKey(req.Args, dryRunArg)
+	}
+	if dryRun && !o.ReadOnly {
+		would := map[string]any{
+			"dry_run":   true,
+			"skipped":   true,
+			"operation": o.Name,
+			"method":    o.Method,
+			"path":      o.PathTmpl,
+			"args":      req.Args,
+		}
+		b, _ := json.Marshal(would)
+		return plugin.Response{
+			CallID:            req.ID,
+			StructuredContent: string(b),
+			Content:           fmt.Sprintf("DRY RUN — %s %s was NOT executed.", o.Method, o.PathTmpl),
+		}
 	}
 
 	// Pull the injected actor id out of the args (it is identity, never a
