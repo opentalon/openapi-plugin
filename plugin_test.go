@@ -108,6 +108,7 @@ type gotRequest struct {
 	query       string
 	header      string // X-Timly-User-Id (credential-header path)
 	identityHdr string // X-App-User (configured IdentityHeader path)
+	groupHdr    string // X-App-Group (configured GroupHeader path)
 	body        map[string]any
 }
 
@@ -123,6 +124,7 @@ func newServer(t *testing.T, capture *gotRequest) *httptest.Server {
 		capture.query = r.URL.RawQuery
 		capture.header = r.Header.Get("X-Timly-User-Id")
 		capture.identityHdr = r.Header.Get("X-App-User")
+		capture.groupHdr = r.Header.Get("X-App-Group")
 		if b, _ := io.ReadAll(r.Body); len(b) > 0 {
 			_ = json.Unmarshal(b, &capture.body)
 		}
@@ -507,6 +509,162 @@ func TestIdentityHeaderForwarding(t *testing.T) {
 	}
 	if strings.Contains(got.query, "entity_id") {
 		t.Errorf("entity_id leaked into query: %s", got.query)
+	}
+}
+
+// configureWith builds a handler from cfg (spec/base pointed at srv).
+func configureWith(t *testing.T, srv *httptest.Server, cfg Config) *handler {
+	t.Helper()
+	cfg.ServerName, cfg.SpecURL, cfg.BaseURL = "api", srv.URL+"/spec", srv.URL
+	b, _ := json.Marshal(cfg)
+	h := &handler{}
+	if err := h.Configure(string(b)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	return h
+}
+
+func injectedArgs(h *handler, action string) []string {
+	for _, a := range h.Capabilities().Actions {
+		if a.Name == action {
+			return a.InjectContextArgs
+		}
+	}
+	return nil
+}
+
+func TestGroupHeaderForwarding(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+	h := configureWith(t, srv, Config{GroupHeader: "X-App-Group"}) // GroupArg defaults to group_id
+
+	if inj := injectedArgs(h, "list_ticket_templates"); len(inj) != 1 || inj[0] != "group_id" {
+		t.Errorf("expected InjectContextArgs [group_id], got %v", inj)
+	}
+
+	// GET: the injected group_id is the header, not a query param.
+	h.Execute(plugin.Request{
+		ID: "1", Action: "list_ticket_templates",
+		Args: map[string]string{"query": "x", "group_id": "42"},
+	})
+	if got.groupHdr != "42" {
+		t.Errorf("group header X-App-Group: got %q, want 42", got.groupHdr)
+	}
+	if strings.Contains(got.query, "group_id") {
+		t.Errorf("group_id leaked into query: %s", got.query)
+	}
+
+	// Write: the injected group_id is the header, not a body field.
+	got = gotRequest{}
+	h.Execute(plugin.Request{
+		ID: "2", Action: "update_ticket",
+		Args: map[string]string{"id": "7", "name": "x", "group_id": "42"},
+	})
+	if got.groupHdr != "42" {
+		t.Errorf("group header on write: got %q, want 42", got.groupHdr)
+	}
+	if _, leaked := got.body["group_id"]; leaked {
+		t.Errorf("group_id leaked into body: %v", got.body)
+	}
+
+	// Empty value (no group on the run): header omitted.
+	got = gotRequest{}
+	h.Execute(plugin.Request{
+		ID: "3", Action: "list_ticket_templates",
+		Args: map[string]string{"group_id": ""},
+	})
+	if got.groupHdr != "" {
+		t.Errorf("empty group must omit the header, got %q", got.groupHdr)
+	}
+}
+
+func TestGroupHeader_CustomArg(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+	h := configureWith(t, srv, Config{GroupArg: "account_id", GroupHeader: "X-App-Group"})
+
+	if inj := injectedArgs(h, "list_ticket_templates"); len(inj) != 1 || inj[0] != "account_id" {
+		t.Errorf("expected InjectContextArgs [account_id], got %v", inj)
+	}
+	h.Execute(plugin.Request{
+		ID: "1", Action: "list_ticket_templates",
+		Args: map[string]string{"account_id": "9"},
+	})
+	if got.groupHdr != "9" || strings.Contains(got.query, "account_id") {
+		t.Errorf("custom group arg: header %q, query %q", got.groupHdr, got.query)
+	}
+}
+
+func TestGroupHeader_UnsetChangesNothing(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+	h := configured(t, srv) // neither identity nor group header configured
+
+	if inj := injectedArgs(h, "list_ticket_templates"); inj != nil {
+		t.Errorf("expected no InjectContextArgs, got %v", inj)
+	}
+	// Unconfigured: group_id is just an ordinary arg, passed through as before.
+	h.Execute(plugin.Request{
+		ID: "1", Action: "list_ticket_templates",
+		Args: map[string]string{"query": "x", "group_id": "42"},
+	})
+	if got.groupHdr != "" {
+		t.Errorf("group header must not be set when group_header is unset, got %q", got.groupHdr)
+	}
+	if !strings.Contains(got.query, "query=x") {
+		t.Errorf("query param missing: %s", got.query)
+	}
+}
+
+func TestIdentityAndGroupHeadersTogether(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+	h := configureWith(t, srv, Config{IdentityHeader: "X-App-User", GroupHeader: "X-App-Group"})
+
+	inj := injectedArgs(h, "list_ticket_templates")
+	if len(inj) != 2 || inj[0] != "entity_id" || inj[1] != "group_id" {
+		t.Errorf("expected InjectContextArgs [entity_id group_id], got %v", inj)
+	}
+	h.Execute(plugin.Request{
+		ID: "1", Action: "list_ticket_templates",
+		Args: map[string]string{"query": "x", "entity_id": "2383", "group_id": "42"},
+	})
+	if got.identityHdr != "2383" || got.groupHdr != "42" {
+		t.Errorf("headers: identity %q (want 2383), group %q (want 42)", got.identityHdr, got.groupHdr)
+	}
+	if strings.Contains(got.query, "entity_id") || strings.Contains(got.query, "group_id") {
+		t.Errorf("context args leaked into query: %s", got.query)
+	}
+}
+
+func TestGroupHeader_DryRunStillSkipsWrites(t *testing.T) {
+	var got gotRequest
+	srv := newServer(t, &got)
+	defer srv.Close()
+	h := configureWith(t, srv, Config{IdentityHeader: "X-App-User", GroupHeader: "X-App-Group"})
+
+	resp := h.Execute(plugin.Request{
+		ID: "1", Action: "update_ticket",
+		Args: map[string]string{"id": "7", "group_id": "42", "entity_id": "2383", dryRunArg: "true"},
+	})
+	if resp.Error != "" {
+		t.Fatalf("dry-run write: unexpected error %q", resp.Error)
+	}
+	if got.method != "" {
+		t.Fatalf("dry-run write executed an HTTP call (%s %s)", got.method, got.path)
+	}
+
+	// A dry-run READ still executes, with the group header.
+	h.Execute(plugin.Request{
+		ID: "2", Action: "list_ticket_templates",
+		Args: map[string]string{"group_id": "42", dryRunArg: "true"},
+	})
+	if got.method != http.MethodGet || got.groupHdr != "42" {
+		t.Errorf("dry-run read: method %q group %q, want GET/42", got.method, got.groupHdr)
 	}
 }
 

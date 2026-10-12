@@ -32,8 +32,14 @@ type Config struct {
 	// per-call identity forwarding is on.
 	IdentityArg    string `json:"identity_arg"`
 	IdentityHeader string `json:"identity_header"`
-	Timeout        string `json:"timeout"`     // Go duration; default 15s
-	Description    string `json:"description"` // capability description surfaced to the LLM
+	// GroupArg is the host context-arg carrying the caller's group / tenant /
+	// account (default "group_id"); GroupHeader is the request header its value
+	// is sent as (the API's tenant header, named here — not in code). Forwarding
+	// is on only when GroupHeader is set; an empty value omits the header.
+	GroupArg    string `json:"group_arg"`
+	GroupHeader string `json:"group_header"`
+	Timeout     string `json:"timeout"`     // Go duration; default 15s
+	Description string `json:"description"` // capability description surfaced to the LLM
 }
 
 // ExtraOp declares an operation that is NOT in the OpenAPI doc — an endpoint the
@@ -91,6 +97,9 @@ func (h *handler) Configure(configJSON string) error {
 	}
 	if cfg.IdentityArg == "" {
 		cfg.IdentityArg = "entity_id"
+	}
+	if cfg.GroupArg == "" {
+		cfg.GroupArg = "group_id"
 	}
 	timeout := 15 * time.Second
 	if cfg.Timeout != "" {
@@ -189,13 +198,18 @@ func (h *handler) Capabilities() plugin.CapabilitiesMsg {
 // describe builds the LLM-facing action description: summary + description, then
 // any x-llm-description guidance and x-synonyms (so RAG retrieval matches alt
 // phrasings). Empty segments are skipped.
-// injectArgs asks the host to inject the actor-identity context arg before each
-// Execute, so identity forwarding works. Empty when not configured.
+// injectArgs asks the host to inject the actor-identity and group (tenant)
+// context args before each Execute, so header forwarding works. Each is
+// requested only when its header is configured; nil when neither is.
 func (h *handler) injectArgs() []string {
-	if h.cfg.IdentityHeader == "" {
-		return nil
+	var args []string
+	if h.cfg.IdentityHeader != "" {
+		args = append(args, h.cfg.IdentityArg)
 	}
-	return []string{h.cfg.IdentityArg}
+	if h.cfg.GroupHeader != "" {
+		args = append(args, h.cfg.GroupArg)
+	}
+	return args
 }
 
 func describe(o operation) string {
