@@ -31,6 +31,22 @@ caller's **credential headers** (from WhoAmI — e.g. a user-id header), and the
 plugin forwards them verbatim, so the request runs **as the workflow's owner**.
 Static, non-identity headers (a service bearer) go in `headers`.
 
+Scheduled and reactive workflow runs have no session, so the host instead
+**injects context args** the actions opt into, and the plugin sends them as
+configured headers (header names are config, not code):
+
+- **Actor** — `identity_arg` (default `entity_id`) → `identity_header`.
+- **Group / tenant / account** — `group_arg` (default `group_id`) → `group_header`.
+
+Each is on only when its header is set. The injected arg is stripped from the
+args, so it never becomes a path/query/body param, and the header is omitted
+when the value is empty. Example (forward the caller and its tenant so the API can scope the call):
+
+```yaml
+      identity_header: "X-User-Id"
+      group_header:    "X-Tenant-Id"
+```
+
 ## Config (in OpenTalon `config.yaml`)
 
 ```yaml
@@ -66,6 +82,10 @@ config. `extra_operations` (below) is a last resort for when no doc exists at al
 | `headers` | no | static request headers; values support `${ENV}` |
 | `allowlist` | no | if set, only these **primary-spec** operation names are exposed (extra specs are always exposed) |
 | `extra_operations` | no | last-resort hand-declared ops (no doc exists); each has `name`/`method`/`path` + `params` (`in`: path/query/body), optional `body_wrap` to nest body params under one key |
+| `identity_arg` | no (default `entity_id`) | host context arg carrying the actor id |
+| `identity_header` | no | request header the actor id is sent as; identity forwarding is on only when set |
+| `group_arg` | no (default `group_id`) | host context arg carrying the caller's group / tenant / account |
+| `group_header` | no | request header the group id is sent as (e.g. `X-Tenant-Id`); group forwarding is on only when set |
 | `timeout` | no (default `15s`) | Go duration for spec fetch + calls |
 
 ## Build

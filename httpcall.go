@@ -69,8 +69,16 @@ func (h *handler) Execute(req plugin.Request) plugin.Response {
 			args = withoutKey(args, h.cfg.IdentityArg)
 		}
 	}
+	// Same for the injected group (tenant/account) id: a header, never a param.
+	group := ""
+	if h.cfg.GroupHeader != "" {
+		if v, present := args[h.cfg.GroupArg]; present {
+			group = v
+			args = withoutKey(args, h.cfg.GroupArg)
+		}
+	}
 
-	httpReq, err := h.buildRequest(o, args, req.CredentialHeaders, identity)
+	httpReq, err := h.buildRequest(o, args, req.CredentialHeaders, identity, group)
 	if err != nil {
 		return plugin.Response{CallID: req.ID, Error: "openapi-plugin: " + err.Error()}
 	}
@@ -98,7 +106,7 @@ func (h *handler) Execute(req plugin.Request) plugin.Response {
 	return plugin.Response{CallID: req.ID, Content: string(body)}
 }
 
-func (h *handler) buildRequest(o operation, args map[string]string, creds map[string]plugin.CredentialHeader, identity string) (*http.Request, error) {
+func (h *handler) buildRequest(o operation, args map[string]string, creds map[string]plugin.CredentialHeader, identity, group string) (*http.Request, error) {
 	// Path params — substitute {name}; all are required.
 	path := o.PathTmpl
 	for _, p := range o.PathParams {
@@ -170,6 +178,11 @@ func (h *handler) buildRequest(o operation, args map[string]string, creds map[st
 	// actor id as the configured identity header (name is config, not code).
 	if h.cfg.IdentityHeader != "" && identity != "" {
 		req.Header.Set(h.cfg.IdentityHeader, identity)
+	}
+	// The caller's group (tenant/account), from the host-injected GroupArg, as
+	// the configured group header. Omitted when unset (e.g. no group on the run).
+	if h.cfg.GroupHeader != "" && group != "" {
+		req.Header.Set(h.cfg.GroupHeader, group)
 	}
 	return req, nil
 }
